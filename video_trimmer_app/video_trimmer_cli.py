@@ -12,11 +12,35 @@ import re
 from pathlib import Path
 from moviepy import VideoFileClip
 import time
-from ffmpeg_trimmer import FFmpegTrimmer
+from typing import Optional, List, Tuple, Union
+from loguru import logger
+try:
+    from .ffmpeg_trimmer import FFmpegTrimmer
+except ImportError:
+    # Fallback for direct script execution
+    from ffmpeg_trimmer import FFmpegTrimmer
+
+# Constants
+SUPPORTED_EXTENSIONS = ['.mp4', '.avi', '.mov', '.mkv', '.ts', '.webm', '.flv']
+DEFAULT_OUTPUT_SUFFIX = '_trimmed'
+MAX_BATCH_SIZE = 100
+MIN_DURATION = 0.1  # 100ms minimum
+MAX_FILENAME_LENGTH = 200
+INVALID_FILENAME_CHARS = r'[<>:"/\\|?*]'
 
 
-def format_duration(seconds):
-    """Format duration in seconds to HH:MM:SS.ss format."""
+def format_duration(seconds: float) -> str:
+    """Format duration in seconds to HH:MM:SS.ss format.
+    
+    Args:
+        seconds: Duration in seconds
+        
+    Returns:
+        str: Formatted duration string
+    """
+    if seconds < 0:
+        return "00:00.00"
+        
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
@@ -27,27 +51,50 @@ def format_duration(seconds):
         return f"{minutes:02d}:{secs:06.2f}"
 
 
-def sanitize_filename(filename):
-    """Sanitize filename by removing invalid characters."""
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename by removing invalid characters.
+    
+    Args:
+        filename: Original filename
+        
+    Returns:
+        str: Sanitized filename safe for filesystem
+    """
+    if not filename:
+        return "unnamed_file"
+        
     # Remove or replace invalid characters for filesystem
-    invalid_chars = r'[<>:"/\\|?*]'
-    sanitized = re.sub(invalid_chars, '_', filename)
+    sanitized = re.sub(INVALID_FILENAME_CHARS, '_', filename)
+    
+    # Limit length
+    if len(sanitized) > MAX_FILENAME_LENGTH:
+        name_part = sanitized[:MAX_FILENAME_LENGTH-10]
+        ext_part = Path(sanitized).suffix
+        sanitized = f"{name_part}...{ext_part}"
+    
     return sanitized
 
 
-def trim_video(input_path, output_path, duration, from_start=True, verbose=False, use_ffmpeg=True):
-    """
-    Trim a video file using either FFmpeg or MoviePy.
+def trim_video(
+    input_path: str, 
+    output_path: str, 
+    duration: float, 
+    from_start: bool = True, 
+    verbose: bool = False, 
+    use_ffmpeg: bool = True
+) -> Tuple[bool, str]:
+    """Trim a video file using either FFmpeg or MoviePy.
     
     Args:
-        input_path (str): Path to input video file
-        output_path (str): Path to output video file
-        duration (float): Duration to trim in seconds
-        from_start (bool): If True, trim from start; if False, trim from end
-        verbose (bool): If True, print detailed information
-        use_ffmpeg (bool): If True, try to use FFmpeg first, fallback to MoviePy
+        input_path: Path to input video file
+        output_path: Path to output video file
+        duration: Duration to trim in seconds
+        from_start: If True, trim from start; if False, trim from end
+        verbose: If True, print detailed information
+        use_ffmpeg: If True, try to use FFmpeg first, fallback to MoviePy
         
     Returns:
+        Tuple[bool, str]: (Success status, Error message or success info)
         bool: True if successful, False otherwise
     """
     try:

@@ -10,44 +10,103 @@ import os
 import sys
 import re
 from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Any
+from loguru import logger
+import shutil
+
+# Constants
+DEFAULT_TIMEOUT = 300  # 5 minutes
+MAX_RETRIES = 2
+INVALID_FILENAME_CHARS = r'[<>:"/\\|?*]'
+SUPPORTED_FORMATS = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.ts']
+FFMPEG_COMMON_PATHS = [
+    'ffmpeg',
+    '/usr/bin/ffmpeg',
+    '/usr/local/bin/ffmpeg',
+    '/opt/homebrew/bin/ffmpeg',  # macOS with Homebrew
+    'C:\\ffmpeg\\bin\\ffmpeg.exe',  # Windows
+    'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',  # Windows
+]
 
 
 class FFmpegTrimmer:
-    """FFmpeg-based video trimmer for efficient trimming without re-encoding."""
+    """FFmpeg-based video trimmer for efficient trimming without re-encoding.
+    
+    Provides fast video trimming using FFmpeg's stream copy feature,
+    avoiding re-encoding for significant performance improvements.
+    
+    Attributes:
+        ffmpeg_path: Path to FFmpeg executable
+    """
     
     def __init__(self):
+        """Initialize FFmpeg trimmer with automatic path detection."""
         self.ffmpeg_path = self._find_ffmpeg()
         
-    def _find_ffmpeg(self):
-        """Find FFmpeg executable path."""
-        # Try common paths and names
-        possible_paths = [
-            'ffmpeg',
-            '/usr/bin/ffmpeg',
-            '/usr/local/bin/ffmpeg',
-            '/opt/homebrew/bin/ffmpeg',  # macOS with Homebrew
-            'C:\\ffmpeg\\bin\\ffmpeg.exe',  # Windows
-            'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',  # Windows
-        ]
+        if not self.ffmpeg_path:
+            logger.warning(
+                "FFmpeg not found. Video trimming will be limited. "
+                "Please install FFmpeg for better performance."
+            )
         
-        for path in possible_paths:
+    def _find_ffmpeg(self) -> Optional[str]:
+        """Find FFmpeg executable path.
+        
+        Returns:
+            Optional[str]: Path to FFmpeg executable or None if not found
+        """
+        # Try shutil.which first (most reliable)
+        ffmpeg_path = shutil.which('ffmpeg')
+        if ffmpeg_path:
+            logger.debug(f"Found FFmpeg via shutil.which: {ffmpeg_path}")
+            return ffmpeg_path
+        
+        # Try common installation paths
+        for path in FFMPEG_COMMON_PATHS:
             try:
-                # Test if ffmpeg is available
-                result = subprocess.run([path, '-version'], 
-                                      capture_output=True, text=True, timeout=5)
+                # Test if ffmpeg is available at this path
+                result = subprocess.run(
+                    [path, '-version'], 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=5
+                )
                 if result.returncode == 0:
+                    logger.debug(f"Found FFmpeg at: {path}")
                     return path
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                 continue
-                
+        
+        logger.warning("FFmpeg not found in system PATH or common locations")        
         return None
     
-    def check_ffmpeg_available(self):
-        """Check if FFmpeg is available on the system."""
+    def check_ffmpeg_available(self) -> bool:
+        """Check if FFmpeg is available on the system.
+        
+        Returns:
+            bool: True if FFmpeg is available
+        """
         return self.ffmpeg_path is not None
     
-    def _sanitize_filename(self, filename):
-        """Sanitize filename by removing invalid characters."""
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename by removing invalid characters.
+        
+        Args:
+            filename: Original filename
+            
+        Returns:
+            str: Sanitized filename safe for filesystem
+        """
+        if not filename:
+            return "unnamed_file"
+            
+        # Remove or replace invalid characters for filesystem
+        sanitized = re.sub(INVALID_FILENAME_CHARS, '_', filename)
+        
+        # Remove leading/trailing whitespace and dots
+        sanitized = sanitized.strip(' .')
+        
+        return sanitized if sanitized else "unnamed_file"
         # Remove or replace invalid characters for filesystem
         invalid_chars = r'[<>:"/\\|?*]'
         sanitized = re.sub(invalid_chars, '_', filename)

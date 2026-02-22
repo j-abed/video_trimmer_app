@@ -18,27 +18,18 @@ import json
 
 # Local imports
 try:
-    from video_trimmer_app.config_manager import ConfigManager  # type: ignore
-    from video_trimmer_app.video_preview import VideoPreview, AsyncVideoLoader  # type: ignore
-    from video_trimmer_app.processing_queue import ProcessingQueue, ProcessingJob, JobStatus  # type: ignore
-    from video_trimmer_app.ffmpeg_trimmer import FFmpegTrimmer  # type: ignore
-    from video_trimmer_app.ffmpeg_processor import AdvancedFFmpegTrimmer  # type: ignore
+    from .config_manager import ConfigManager
+    from .video_preview import VideoPreview, AsyncVideoLoader
+    from .processing_queue import ProcessingQueue, ProcessingJob, JobStatus
+    from .ffmpeg_trimmer import FFmpegTrimmer
+    from .ffmpeg_processor import AdvancedFFmpegTrimmer
 except ImportError:
-    # Fallback for relative imports if running as part of the package
-    try:
-        from .config_manager import ConfigManager  # type: ignore
-        from .video_preview import VideoPreview, AsyncVideoLoader  # type: ignore
-        from .processing_queue import ProcessingQueue, ProcessingJob, JobStatus  # type: ignore
-        from .ffmpeg_trimmer import FFmpegTrimmer  # type: ignore
-        from .ffmpeg_processor import AdvancedFFmpegTrimmer  # type: ignore
-    except ImportError:
-        # Final fallback for direct script execution in same directory
-        from config_manager import ConfigManager  # type: ignore
-        from video_preview import VideoPreview, AsyncVideoLoader  # type: ignore
-        from processing_queue import ProcessingQueue, ProcessingJob, JobStatus  # type: ignore
-        from ffmpeg_trimmer import FFmpegTrimmer  # type: ignore
-        from ffmpeg_processor import AdvancedFFmpegTrimmer  # type: ignore
-    
+    # Fallback for direct script execution
+    from config_manager import ConfigManager
+    from video_preview import VideoPreview, AsyncVideoLoader
+    from processing_queue import ProcessingQueue, ProcessingJob, JobStatus
+    from ffmpeg_trimmer import FFmpegTrimmer
+    from ffmpeg_processor import AdvancedFFmpegTrimmer
 from moviepy import VideoFileClip
 
 # Import PIL components for preview
@@ -47,7 +38,8 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-    # Don't set Image/ImageTk to None to avoid type annotation issues
+    # Don't set Image to None to avoid type annotation issues
+    logger.warning("PIL not available - video preview will be limited")
 
 # Constants
 APP_TITLE = "Enhanced Video Trimmer"
@@ -56,7 +48,7 @@ MIN_WINDOW_WIDTH = 1200
 MIN_WINDOW_HEIGHT = 800
 DEFAULT_WINDOW_SIZE = (1400, 900)
 SUPPORTED_VIDEO_FORMATS = [
-    '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v', '.3gp'
+    '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.m4v', '.3gp', '.ts'
 ]
 MAX_RECENT_FILES = 10
 AUTO_SAVE_INTERVAL = 30  # seconds
@@ -106,6 +98,7 @@ class TimelineWidget(ctk.CTkFrame):
         self._drag_mode: Optional[str] = None
         self._last_click_pos = 0
         self.on_time_select: Optional[Callable[[float], None]] = None
+        self.on_trim_change: Optional[Callable[[float, float], None]] = None
         
         self.setup_ui()
         
@@ -114,7 +107,7 @@ class TimelineWidget(ctk.CTkFrame):
         # Timeline canvas
         self.canvas = tk.Canvas(
             self, 
-            height=TIMELINE_HEIGHT, 
+            height=80, 
             bg='#2b2b2b',
             highlightthickness=0
         )
@@ -123,6 +116,7 @@ class TimelineWidget(ctk.CTkFrame):
         # Bind events
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Motion>", self.on_hover)
         self.canvas.bind("<Configure>", lambda e: self._draw_timeline())
 
@@ -136,35 +130,50 @@ class TimelineWidget(ctk.CTkFrame):
         threading.Thread(target=self._generate_pil_thumbnails, daemon=True).start()
 
     def _generate_pil_thumbnails(self):
-        """Generate PIL Image thumbnails in a background thread."""
-        if not self.video_preview.video_path:
-            logger.warning("Cannot generate thumbnails, no video path.")
-            return
+        """Generate thumbnails for timeline."""
+        try:
+            # Check if video is properly loaded
+            if not self.video_preview.current_video and not self.video_preview._moviepy_clip:
+                logger.warning("No video loaded for timeline thumbnails")
+                return
+            
+            logger.debug("Generating timeline thumbnails...")
+            # Generate 10 thumbnails
+            pil_thumbs = self.video_preview.generate_timeline_thumbnails(count=10, as_pil=True)
+            self._pil_thumbnails = pil_thumbs
+            logger.debug(f"Generated {len(pil_thumbs)} PIL thumbnails.")
 
-        logger.debug("Starting PIL thumbnail generation in background.")
-        # Generate 10 thumbnails as PIL images
-        pil_thumbs = self.video_preview.generate_timeline_thumbnails(count=10, as_pil=True)
-        self._pil_thumbnails = pil_thumbs
-        logger.debug(f"Generated {len(pil_thumbs)} PIL thumbnails.")
+            # Schedule the PhotoImage creation and drawing on the main thread
+            self.after(0, self._create_photo_images_and_draw)
 
-        # Schedule the PhotoImage creation and drawing on the main thread
-        self.after(0, self._create_photo_images_and_draw)
+        except Exception as e:
+            logger.error(f"Error generating timeline thumbnails: {e}")
+            self.thumbnails = []
+            self.after(0, self._draw_timeline)
 
     def _create_photo_images_and_draw(self):
-        """Create PhotoImage objects from PIL images and draw the timeline."""
-        if not PIL_AVAILABLE:
-            return
-        
-        self.thumbnails = []
-        for pil_img in self._pil_thumbnails:
-            try:
-                self.thumbnails.append(ImageTk.PhotoImage(pil_img))
-            except Exception as e:
-                logger.error(f"Failed to create PhotoImage: {e}")
-        
-        logger.debug(f"Created {len(self.thumbnails)} PhotoImage objects.")
-        self._draw_timeline()
+        """Create PhotoImage objects and draw them on the canvas."""
+        try:
+            # Clear canvas
+            self.canvas.delete("all")
+            
+            # Create PhotoImage objects
+            self.thumbnails = []
+            if PIL_AVAILABLE:
+                for i, pil_thumb in enumerate(self._pil_thumbnails):
+                    photo = ImageTk.PhotoImage(pil_thumb)
+                    self.thumbnails.append(photo)
+            else:
+                logger.warning("PIL not available - cannot create PhotoImage objects")
+            
+            logger.debug(f"Created {len(self.thumbnails)} PhotoImage objects.")
+            self._draw_timeline()
 
+        except Exception as e:
+            logger.error(f"Error creating PhotoImage objects: {e}")
+            self.thumbnails = []
+            self.after(0, self._draw_timeline)
+    
     def _draw_timeline(self):
         """Draw timeline with thumbnails and trim markers."""
         self.canvas.delete("all")
@@ -175,98 +184,144 @@ class TimelineWidget(ctk.CTkFrame):
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         
-        if width <= 1 or height <= 1:  # Canvas not ready
-            self.after(50, self._draw_timeline) # Retry after a short delay
+        if width <= 1:  # Canvas not ready
             return
-
+        
         # Draw background
-        self.canvas.create_rectangle(0, 0, width, height, fill="#2b2b2b", outline="")
-
-        # Draw thumbnails
-        if self.thumbnails:
-            thumb_width = width / max(len(self.thumbnails), 1)
-            for i, thumb in enumerate(self.thumbnails):
-                x = i * thumb_width
-                self.canvas.create_image(x, 0, anchor="nw", image=thumb)
-        else:
-            # Draw a placeholder if no thumbnails
-            self.canvas.create_text(width / 2, height / 2, text="Generating thumbnails...", fill="white")
-
-        # Draw trim start marker
+        self.canvas.create_rectangle(0, 0, width, height, fill="gray20", outline="gray30")
+        
+        # Draw selected region FIRST (behind thumbnails)
         start_x = (self.trim_start / self.duration) * width
-        self.canvas.create_line(start_x, 0, start_x, height, fill="#4CAF50", width=3, tags="start_marker")
-        self.canvas.create_text(start_x + 5, height - 10, text=self.format_duration(self.trim_start), fill="white", anchor="sw")
-
-        # Draw trim end marker
         end_x = (self.trim_end / self.duration) * width
-        self.canvas.create_line(end_x, 0, end_x, height, fill="#F44336", width=3, tags="end_marker")
-        self.canvas.create_text(end_x - 5, height - 10, text=self.format_duration(self.trim_end), fill="white", anchor="se")
-
-        # Draw selected region overlay
         self.canvas.create_rectangle(
             start_x, 0, end_x, height,
-            fill="blue", stipple="gray25", outline="", tags="selection"
+            fill="lightblue", outline="blue", width=1, tags="selection"
         )
-        # Bring markers to front
-        self.canvas.tag_raise("start_marker")
-        self.canvas.tag_raise("end_marker")
-
+        
+        # Draw thumbnails on top of selection
+        if self.thumbnails:
+            thumb_width = width // len(self.thumbnails)
+            for i, thumb in enumerate(self.thumbnails):
+                x = i * thumb_width
+                try:
+                    # Handle both PhotoImage and PIL Image objects
+                    if thumb:  # Check if thumbnail exists
+                        # Try to display as PhotoImage first
+                        if hasattr(thumb, 'width'):  # PhotoImage or PIL Image
+                            # Draw with small margin
+                            self.canvas.create_image(x + 2, 5, anchor="nw", image=thumb)
+                        else:
+                            logger.debug(f"Invalid thumbnail at position {i}")
+                            
+                except Exception as e:
+                    logger.debug(f"Error drawing thumbnail {i}: {e}")
+                    # Draw placeholder rectangle for failed thumbnails
+                    self.canvas.create_rectangle(
+                        x + 2, 5, x + thumb_width - 2, height - 5,
+                        fill="gray40", outline="gray50"
+                    )
+                    # Add text indicating loading/error
+                    self.canvas.create_text(
+                        x + thumb_width // 2, height // 2,
+                        text="...", fill="white", anchor="center"
+                    )
+        else:
+            # No thumbnails - show loading message
+            self.canvas.create_text(
+                width // 2, height // 2,
+                text="Generating thumbnails...", fill="white", anchor="center"
+            )
+        
+        # Draw trim markers on top
+        self.canvas.create_line(start_x, 0, start_x, height, fill="green", width=4, tags="start_marker")
+        self.canvas.create_rectangle(start_x-5, 0, start_x+5, 20, fill="green", outline="darkgreen", width=1, tags="start_handle")
+        self.canvas.create_text(start_x + 8, 15, text="Start", fill="green", anchor="w")
+        
+        self.canvas.create_line(end_x, 0, end_x, height, fill="red", width=4, tags="end_marker") 
+        self.canvas.create_rectangle(end_x-5, 0, end_x+5, 20, fill="red", outline="darkred", width=1, tags="end_handle")
+        self.canvas.create_text(end_x - 8, 15, text="End", fill="red", anchor="e")
+    
     def on_click(self, event):
         """Handle timeline click."""
         if self.duration <= 0:
             return
-
+        
         width = self.canvas.winfo_width()
-        time_pos = (event.x / width) * self.duration
-
+        if width <= 1:
+            return
+            
+        time_pos = max(0, min((event.x / width) * self.duration, self.duration))
+        
         # Determine if we are dragging a marker
         start_x = (self.trim_start / self.duration) * width
         end_x = (self.trim_end / self.duration) * width
 
-        if abs(event.x - start_x) < 10:
+        if abs(event.x - start_x) < 15:
             self._drag_mode = "start"
-        elif abs(event.x - end_x) < 10:
+        elif abs(event.x - end_x) < 15:
             self._drag_mode = "end"
         else:
-            self._drag_mode = None
+            self._drag_mode = "playhead" # Not dragging a marker, so move playhead
 
         # Update position based on click
-        self.on_drag(event)
+        if self._drag_mode in ["start", "end"]:
+            self.on_drag(event)
 
     def on_drag(self, event):
         """Handle timeline drag."""
         if self.duration <= 0:
             return
-
+        
         width = self.canvas.winfo_width()
+        if width <= 1:
+            return
+            
         time_pos = max(0, min((event.x / width) * self.duration, self.duration))
-
+        
         if self._drag_mode == "start":
-            self.trim_start = min(time_pos, self.trim_end - 0.1) # Ensure start < end
+            self.trim_start = max(0, min(time_pos, self.trim_end - 0.5)) # Ensure start < end with minimum gap
         elif self._drag_mode == "end":
-            self.trim_end = max(time_pos, self.trim_start + 0.1) # Ensure end > start
+            self.trim_end = min(self.duration, max(time_pos, self.trim_start + 0.5)) # Ensure end > start with minimum gap
+        elif self._drag_mode == "playhead":
+            # Just update the preview position without changing trim markers
+            pass
         
         self._draw_timeline()
 
-        if self.on_time_select:
-            self.on_time_select(time_pos)
+        # Notify about changes after drawing
+        if self.on_trim_change and (self._drag_mode == "start" or self._drag_mode == "end"):
+            self.on_trim_change(self.trim_start, self.trim_end)
 
+        if self.on_time_select:
+            # If dragging a marker, send that marker's time. Otherwise, send the raw time_pos.
+            if self._drag_mode == "start":
+                self.on_time_select(self.trim_start)
+            elif self._drag_mode == "end":
+                self.on_time_select(self.trim_end)
+            else:
+                # Ensure time_pos is within bounds for preview
+                preview_time = max(0, min(time_pos, self.duration - 0.1))
+                self.on_time_select(preview_time)
+    
+    def on_release(self, event):
+        """Handle mouse button release."""
+        self._drag_mode = None
+    
     def on_hover(self, event):
         """Handle mouse hover for tooltip."""
         if self.duration <= 0:
             return
-
+        
         width = self.canvas.winfo_width()
         time_pos = (event.x / width) * self.duration
-
+        
         # Show time tooltip
         self.canvas.delete("tooltip")
         self.canvas.create_text(
-            event.x, 15, 
-            text=self.format_duration(time_pos), 
+            event.x, 10, 
+            text=f"{time_pos:.2f}s", 
             fill="white", 
-            tags="tooltip",
-            font=("Arial", 10, "bold")
+            tags="tooltip"
         )
 
     def get_trim_settings(self) -> Dict[str, float]:
@@ -276,14 +331,6 @@ class TimelineWidget(ctk.CTkFrame):
             'end': self.trim_end,
             'duration': self.trim_end - self.trim_start
         }
-
-    @staticmethod
-    def format_duration(seconds: float) -> str:
-        """Formats seconds into HH:MM:SS.ms"""
-        if seconds < 0: seconds = 0
-        m, s = divmod(seconds, 60)
-        h, m = divmod(m, 60)
-        return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
 
 
 class BatchProcessingDialog(ctk.CTkToplevel):
@@ -403,19 +450,7 @@ class BatchProcessingDialog(ctk.CTkToplevel):
     def _generate_output_path(self, input_path: str) -> str:
         """Generate output path for input file."""
         path = Path(input_path)
-        counter = 1
-        
-        # Find unique filename
-        while True:
-            if counter == 1:
-                output_path = path.parent / f"{path.stem}_trimmed{path.suffix}"
-            else:
-                output_path = path.parent / f"{path.stem}_trimmed_{counter}{path.suffix}"
-            
-            if not output_path.exists():
-                return str(output_path)
-            
-            counter += 1
+        return str(path.parent / f"{path.stem}_trimmed{path.suffix}")
 
 
 class AdvancedVideoTrimmer(TkinterDnD.Tk):
@@ -425,15 +460,15 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
         super().__init__()
         
         # Initialize managers
-        self.config = ConfigManager()
+        self.config_manager = ConfigManager()
         self.video_preview = VideoPreview()
         self.async_loader = AsyncVideoLoader(self.video_preview)
-        self.queue_manager = ProcessingQueue(max_workers=self.config.get("processing.concurrent_jobs", 2))
+        self.queue_manager = ProcessingQueue(max_workers=self.config_manager.get("processing.concurrent_jobs", 2))
         self.ffmpeg_trimmer = FFmpegTrimmer()
         
         # Register processing engines
         self.queue_manager.register_engine("ffmpeg", self.ffmpeg_trimmer)
-        self.queue_manager.register_engine("moviepy", None)  # Will be handled specially
+        # MoviePy engine is handled specially in processing queue (no registration needed)
         
         # Setup queue callbacks
         self.queue_manager.on_job_completed = self.on_job_completed
@@ -444,6 +479,9 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
         self.current_video_info = None
         self.processing_jobs = {}
         
+        # Load theme settings before creating UI
+        self.load_theme_settings()
+        
         self.setup_ui()
         self.setup_drag_drop()
         self.load_settings()
@@ -452,21 +490,12 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
         self.queue_manager.start_processing()
         
         logger.info("Advanced Video Trimmer started")
-
-    def on_close(self):
-        """Handle window closing."""
-        self.config.set("appearance.window_geometry", self.geometry())
-        self.config.save_config()
-        self.video_preview.release_video()
-        self.queue_manager.stop_processing()
-        self.destroy()
-
+    
     def setup_ui(self):
         """Setup the main user interface."""
         self.title("Advanced Video Trimmer Pro")
-        self.geometry(self.config.get("appearance.window_geometry", "1000x800"))
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
+        self.geometry(self.config_manager.get("appearance.window_geometry", "1200x900"))
+        
         # Configure grid
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -475,6 +504,7 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         self.main_frame.grid_columnconfigure(1, weight=1)
+        self.main_frame.grid_rowconfigure(1, weight=1)
         
         self.setup_menu()
         self.setup_main_content()
@@ -505,9 +535,8 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
     def setup_main_content(self):
         """Setup main content area."""
         # Left panel - File info and controls
-        self.left_panel = ctk.CTkFrame(self.main_frame, width=300)
-        self.left_panel.grid(row=1, column=0, sticky="ns", padx=(0, 5), pady=5)
-        self.left_panel.grid_propagate(False)
+        self.left_panel = ctk.CTkScrollableFrame(self.main_frame, width=320)
+        self.left_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 5), pady=5)
         
         # Right panel - Preview and timeline
         self.right_panel = ctk.CTkFrame(self.main_frame)
@@ -613,10 +642,24 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
         ctk.CTkLabel(preview_section, text="Video Preview", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=5)
         
         # Video preview canvas
-        self.preview_canvas = tk.Canvas(preview_section, bg='black', width=PREVIEW_SIZE[0], height=PREVIEW_SIZE[1], highlightthickness=0)
-        self.preview_canvas.pack(pady=5)
-        self.preview_photo = None # To hold the PhotoImage
-
+        self.preview_frame = ctk.CTkFrame(preview_section, height=300)
+        self.preview_frame.pack(fill="x", padx=5, pady=5)
+        
+        # Create canvas for video preview
+        self.preview_canvas = tk.Canvas(self.preview_frame, bg="black", height=280)
+        self.preview_canvas.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Placeholder text (will be hidden when video loads)
+        self.preview_placeholder = ctk.CTkLabel(
+            self.preview_frame, 
+            text="Video preview will appear here\n(Drop video files anywhere)",
+            text_color="gray"
+        )
+        self.preview_placeholder.place(relx=0.5, rely=0.5, anchor="center")
+        
+        # Store current preview image reference
+        self.current_preview_image = None
+        
         # Timeline section
         timeline_section = ctk.CTkFrame(self.right_panel)
         timeline_section.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
@@ -629,6 +672,7 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
         self.timeline = TimelineWidget(timeline_section, self.video_preview)
         self.timeline.pack(fill="both", expand=True, padx=5, pady=5)
         self.timeline.on_time_select = self.update_video_preview
+        self.timeline.on_trim_change = self.on_timeline_trim_changed
 
     def setup_status_bar(self):
         """Setup status bar."""
@@ -651,10 +695,10 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
         self.drop_target_register(DND_FILES)
         self.dnd_bind('<<Drop>>', self.on_file_drop)
         
-        # Also register for the preview canvas
-        self.preview_canvas.drop_target_register(DND_FILES)
-        self.preview_canvas.dnd_bind('<<Drop>>', self.on_file_drop)
-
+        # Also register for the preview frame
+        self.preview_frame.drop_target_register(DND_FILES)
+        self.preview_frame.dnd_bind('<<Drop>>', self.on_file_drop)
+    
     def on_file_drop(self, event):
         """Handle dropped files."""
         files = event.data.split()
@@ -691,13 +735,18 @@ class AdvancedVideoTrimmer(TkinterDnD.Tk):
         self.async_loader.load_video_async(file_path, self.on_video_loaded)
         
         # Add to recent files
-        self.config.add_recent_file(file_path)
+        self.config_manager.add_recent_file(file_path)
     
     def on_video_loaded(self, success: bool, video_info: Optional[dict]):
         """Callback when video is loaded."""
         if success and video_info:
             self.current_video_info = video_info
+            
+            # Update timeline
             self.timeline.load_timeline(video_info['duration'])
+            
+            # Update video preview
+            self.update_video_preview()
             
             # Update info display
             info_text = f"""Duration: {self.format_duration(video_info['duration'])}
@@ -709,33 +758,120 @@ Estimated Bitrate: {video_info.get('bitrate', 0):.0f} kbps"""
             self.info_text.delete("0.0", "end")
             self.info_text.insert("0.0", info_text)
             
-            self.status_var.set(f"Video loaded: {os.path.basename(self.video_preview.video_path)}")
-            
-            # Schedule the first preview update
-            self.after(100, lambda: self.update_video_preview(0))
+            self.status_var.set(f"Video loaded: {self.format_duration(video_info['duration'])}")
         else:
             messagebox.showerror("Error", "Failed to load video file")
             self.status_var.set("Error loading video")
-
-    def update_video_preview(self, time_pos: float):
-        """Update the video preview to a specific time."""
-        if not self.video_preview.video_path or not PIL_AVAILABLE:
-            return
-
-        # Get the frame as a PIL image
-        pil_image = self.video_preview.get_frame_as_pil(
-            time_seconds=time_pos,
-            size=PREVIEW_SIZE
-        )
-
-        if pil_image:
-            # Create a PhotoImage and display it on the canvas
-            self.preview_photo = ImageTk.PhotoImage(pil_image)
-            self.preview_canvas.create_image(0, 0, anchor="nw", image=self.preview_photo)
+    
+    def update_video_preview(self, time_pos: float = 0.0):
+        """Update video preview with frame at given time position."""
+        try:
+            if not self.video_preview.current_video and not self.video_preview._moviepy_clip:
+                return
             
-            # Update status with current time
-            self.status_var.set(f"Preview at {self.format_duration(time_pos)}")
-
+            # Get canvas dimensions
+            canvas_width = self.preview_canvas.winfo_width()
+            canvas_height = self.preview_canvas.winfo_height()
+            
+            if canvas_width <= 1 or canvas_height <= 1:
+                # Canvas not ready, try again later
+                self.after(100, lambda: self.update_video_preview(time_pos))
+                return
+            
+            # Calculate display size maintaining aspect ratio
+            if self.current_video_info:
+                video_width = self.current_video_info['width']
+                video_height = self.current_video_info['height']
+                
+                # Calculate scaling to fit canvas while maintaining aspect ratio
+                scale_w = (canvas_width - 20) / video_width  # 10px margin each side
+                scale_h = (canvas_height - 20) / video_height  # 10px margin each side
+                scale = min(scale_w, scale_h)
+                
+                display_width = int(video_width * scale)
+                display_height = int(video_height * scale)
+            else:
+                display_width = canvas_width - 20
+                display_height = canvas_height - 20
+            
+            # Get frame from video
+            frame = self.video_preview.get_frame_at_time(time_pos, (display_width, display_height))
+            
+            if frame is not None:
+                # Convert numpy array to PIL Image
+                if PIL_AVAILABLE:
+                    pil_image = Image.fromarray(frame)
+                    # Convert to PhotoImage
+                    photo = ImageTk.PhotoImage(pil_image)
+                    
+                    # Clear canvas and display image
+                    self.preview_canvas.delete("all")
+                    self.preview_canvas.create_image(
+                        canvas_width // 2, canvas_height // 2,
+                        image=photo, anchor="center"
+                    )
+                    
+                    # Store reference to prevent garbage collection
+                    self.current_preview_image = photo
+                    
+                    # Hide placeholder text
+                    self.preview_placeholder.place_forget()
+                    
+                else:
+                    # Fallback: show text if PIL not available
+                    self.preview_canvas.delete("all")
+                    self.preview_canvas.create_text(
+                        canvas_width // 2, canvas_height // 2,
+                        text="Video loaded\n(PIL required for preview)",
+                        fill="white", anchor="center"
+                    )
+                    self.preview_placeholder.place_forget()
+            else:
+                # Failed to get frame
+                self.preview_canvas.delete("all")
+                self.preview_canvas.create_text(
+                    canvas_width // 2, canvas_height // 2,
+                    text="Preview not available", fill="red", anchor="center"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error updating video preview: {e}")
+            # Show error in canvas
+            try:
+                self.preview_canvas.delete("all")
+                self.preview_canvas.create_text(
+                    self.preview_canvas.winfo_width() // 2,
+                    self.preview_canvas.winfo_height() // 2,
+                    text="Preview error", fill="red", anchor="center"
+                )
+            except:
+                pass
+    
+    def on_timeline_trim_changed(self, trim_start: float, trim_end: float):
+        """Handle timeline trim changes and update UI controls."""
+        try:
+            if not self.current_video_info:
+                return
+                
+            total_duration = self.current_video_info['duration']
+            
+            # Calculate how much is being trimmed from each end
+            trim_from_start = trim_start
+            trim_from_end = total_duration - trim_end
+            
+            # Update controls based on which end has more trimming
+            if trim_from_start > trim_from_end:
+                # More trimmed from start
+                self.direction_var.set("start")
+                self.duration_var.set(f"{trim_from_start:.2f}")
+            else:
+                # More trimmed from end (or equal)
+                self.direction_var.set("end")
+                self.duration_var.set(f"{trim_from_end:.2f}")
+                
+        except Exception as e:
+            logger.error(f"Error updating trim controls: {e}")
+    
     def add_to_queue(self):
         """Add current video to processing queue."""
         if not self.current_video_info:
@@ -782,15 +918,7 @@ Estimated Bitrate: {video_info.get('bitrate', 0):.0f} kbps"""
                 return str(output_path)
             
             counter += 1
-
-    @staticmethod
-    def format_duration(seconds: float) -> str:
-        """Formats seconds into HH:MM:SS.ms"""
-        if seconds < 0: seconds = 0
-        m, s = divmod(seconds, 60)
-        h, m = divmod(m, 60)
-        return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
-
+    
     def preview_trim(self):
         """Preview trim settings."""
         if not self.current_video_info:
@@ -834,7 +962,7 @@ Quality: {self.quality_var.get().title()}"""
     
     def show_recent_files(self):
         """Show recent files menu."""
-        recent_files = self.config.get_recent_files()
+        recent_files = self.config_manager.get_recent_files()
         
         if not recent_files:
             messagebox.showinfo("Info", "No recent files found.")
@@ -985,7 +1113,7 @@ Quality: {self.quality_var.get().title()}"""
         theme_frame.pack(fill="x", padx=10, pady=5)
         
         ctk.CTkLabel(theme_frame, text="Theme:").pack(anchor="w", padx=5)
-        theme_var = tk.StringVar(value=self.config.get("appearance.theme", "dark"))
+        theme_var = tk.StringVar(value=self.config_manager.get("appearance.theme", "dark"))
         theme_menu = ctk.CTkOptionMenu(theme_frame, variable=theme_var, values=["dark", "light"])
         theme_menu.pack(fill="x", padx=5, pady=2)
         
@@ -994,7 +1122,7 @@ Quality: {self.quality_var.get().title()}"""
         color_frame.pack(fill="x", padx=10, pady=5)
         
         ctk.CTkLabel(color_frame, text="Color Theme:").pack(anchor="w", padx=5)
-        color_var = tk.StringVar(value=self.config.get("appearance.color_theme", "blue"))
+        color_var = tk.StringVar(value=self.config_manager.get("appearance.color_theme", "blue"))
         color_menu = ctk.CTkOptionMenu(color_frame, variable=color_var, values=["blue", "green", "dark-blue"])
         color_menu.pack(fill="x", padx=5, pady=2)
         
@@ -1011,7 +1139,7 @@ Quality: {self.quality_var.get().title()}"""
         jobs_frame.pack(fill="x", padx=10, pady=5)
         
         ctk.CTkLabel(jobs_frame, text="Concurrent Jobs:").pack(anchor="w", padx=5)
-        jobs_var = tk.StringVar(value=str(self.config.get("processing.concurrent_jobs", 2)))
+        jobs_var = tk.StringVar(value=str(self.config_manager.get("processing.concurrent_jobs", 2)))
         jobs_entry = ctk.CTkEntry(jobs_frame, textvariable=jobs_var)
         jobs_entry.pack(fill="x", padx=5, pady=2)
         
@@ -1019,7 +1147,7 @@ Quality: {self.quality_var.get().title()}"""
         hw_frame = ctk.CTkFrame(parent)
         hw_frame.pack(fill="x", padx=10, pady=5)
         
-        hw_var = tk.BooleanVar(value=self.config.get("processing.hardware_acceleration", True))
+        hw_var = tk.BooleanVar(value=self.config_manager.get("processing.hardware_acceleration", True))
         ctk.CTkCheckBox(hw_frame, text="Enable Hardware Acceleration", variable=hw_var).pack(anchor="w", padx=5, pady=5)
         
         # Store references
@@ -1034,14 +1162,14 @@ Quality: {self.quality_var.get().title()}"""
         log_frame = ctk.CTkFrame(parent)
         log_frame.pack(fill="x", padx=10, pady=5)
         
-        log_var = tk.BooleanVar(value=self.config.get("advanced.verbose_logging", False))
+        log_var = tk.BooleanVar(value=self.config_manager.get("advanced.verbose_logging", False))
         ctk.CTkCheckBox(log_frame, text="Enable Verbose Logging", variable=log_var).pack(anchor="w", padx=5, pady=5)
         
         # Auto updates
         update_frame = ctk.CTkFrame(parent)
         update_frame.pack(fill="x", padx=10, pady=5)
         
-        update_var = tk.BooleanVar(value=self.config.get("advanced.check_updates", True))
+        update_var = tk.BooleanVar(value=self.config_manager.get("advanced.check_updates", True))
         ctk.CTkCheckBox(update_frame, text="Check for Updates", variable=update_var).pack(anchor="w", padx=5, pady=5)
         
         # Store references
@@ -1053,18 +1181,41 @@ Quality: {self.quality_var.get().title()}"""
         try:
             # Save settings based on current tab and available variables
             if hasattr(self, 'theme_var'):
-                self.config.set("appearance.theme", self.theme_var.get())
-                self.config.set("appearance.color_theme", self.color_var.get())
+                old_theme = self.config_manager.get("appearance.theme", "dark")
+                new_theme = self.theme_var.get()
+                old_color = self.config_manager.get("appearance.color_theme", "blue")
+                new_color = self.color_var.get()
+                
+                self.config_manager.set("appearance.theme", new_theme)
+                self.config_manager.set("appearance.color_theme", new_color)
+                
+                # Apply theme changes immediately
+                theme_changed = False
+                if old_theme != new_theme:
+                    ctk.set_appearance_mode(new_theme)
+                    theme_changed = True
+                if old_color != new_color:
+                    ctk.set_default_color_theme(new_color)
+                    theme_changed = True
+                    
+                if theme_changed:
+                    messagebox.showinfo("Settings", "Settings saved! Please restart the application for color theme changes to take full effect.")
+                else:
+                    messagebox.showinfo("Settings", "Settings saved successfully!")
             
             if hasattr(self, 'jobs_var'):
-                self.config.set("processing.concurrent_jobs", int(self.jobs_var.get()))
-                self.config.set("processing.hardware_acceleration", self.hw_var.get())
+                self.config_manager.set("processing.concurrent_jobs", int(self.jobs_var.get()))
+                self.config_manager.set("processing.hardware_acceleration", self.hw_var.get())
             
             if hasattr(self, 'log_var'):
-                self.config.set("advanced.verbose_logging", self.log_var.get())
-                self.config.set("advanced.check_updates", self.update_var.get())
+                self.config_manager.set("advanced.verbose_logging", self.log_var.get())
+                self.config_manager.set("advanced.check_updates", self.update_var.get())
             
-            messagebox.showinfo("Settings", "Settings saved successfully!")
+            # Save config to disk
+            self.config_manager.save_config()
+            
+            if not hasattr(self, 'theme_var'):
+                messagebox.showinfo("Settings", "Settings saved successfully!")
             
         except ValueError:
             messagebox.showerror("Error", "Please enter valid values for all settings.")
@@ -1072,7 +1223,7 @@ Quality: {self.quality_var.get().title()}"""
     def reset_settings(self):
         """Reset settings to defaults."""
         if messagebox.askyesno("Confirm Reset", "Reset all settings to defaults?"):
-            self.config.reset_to_defaults()
+            self.config_manager.reset_to_defaults()
             messagebox.showinfo("Settings", "Settings reset to defaults.")
     
     def save_preset(self):
@@ -1085,50 +1236,127 @@ Quality: {self.quality_var.get().title()}"""
                 'quality': self.quality_var.get(),
                 'engine': self.engine_var.get()
             }
-            self.config.save_preset(name, preset)
+            self.config_manager.save_preset(name, preset)
             messagebox.showinfo("Preset", f"Preset '{name}' saved successfully!")
     
     def load_preset(self):
         """Load settings from preset."""
-        presets = self.config.get_presets()
-        if not presets:
+        # Get saved presets
+        saved_presets = self.config_manager.get_presets()
+        
+        # Define built-in presets
+        builtin_presets = {
+            "Remove First 10s": {
+                'duration': '10',
+                'direction': 'start',
+                'quality': 'original',
+                'engine': 'ffmpeg'
+            },
+            "Remove Last 10s": {
+                'duration': '10', 
+                'direction': 'end',
+                'quality': 'original',
+                'engine': 'ffmpeg'
+            },
+            "Remove First 30s": {
+                'duration': '30',
+                'direction': 'start', 
+                'quality': 'original',
+                'engine': 'ffmpeg'
+            },
+            "Remove Last 30s": {
+                'duration': '30',
+                'direction': 'end',
+                'quality': 'original', 
+                'engine': 'ffmpeg'
+            },
+            "Quick Trim (5s start)": {
+                'duration': '5',
+                'direction': 'start',
+                'quality': 'original',
+                'engine': 'ffmpeg'
+            },
+            "Quick Trim (5s end)": {
+                'duration': '5',
+                'direction': 'end',
+                'quality': 'original',
+                'engine': 'ffmpeg'
+            }
+        }
+        
+        # Combine built-in and saved presets
+        all_presets = {**builtin_presets, **saved_presets}
+        
+        if not all_presets:
             messagebox.showinfo("Presets", "No presets found.")
             return
         
         # Create preset selection dialog
         dialog = ctk.CTkToplevel(self)
         dialog.title("Load Preset")
-        dialog.geometry("300x200")
+        dialog.geometry("350x300")
         
-        ctk.CTkLabel(dialog, text="Select Preset:").pack(pady=10)
+        ctk.CTkLabel(dialog, text="Select Preset:", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=10)
         
-        preset_var = tk.StringVar(value=list(presets.keys())[0])
-        preset_menu = ctk.CTkOptionMenu(dialog, variable=preset_var, values=list(presets.keys()))
-        preset_menu.pack(pady=10)
+        # Preset list with categories
+        listbox_frame = ctk.CTkFrame(dialog)
+        listbox_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        preset_listbox = tk.Listbox(listbox_frame, height=10)
+        preset_listbox.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Add built-in presets first (with separator)
+        if builtin_presets:
+            preset_listbox.insert(tk.END, "--- Built-in Presets ---")
+            for name in builtin_presets.keys():
+                preset_listbox.insert(tk.END, name)
+        
+        # Add saved presets
+        if saved_presets:
+            if builtin_presets:  # Add separator if we have both types
+                preset_listbox.insert(tk.END, "")
+                preset_listbox.insert(tk.END, "--- Saved Presets ---")
+            for name in saved_presets.keys():
+                preset_listbox.insert(tk.END, name)
         
         def load_selected():
-            preset = presets[preset_var.get()]
-            self.duration_var.set(preset.get('duration', '10'))
-            self.direction_var.set(preset.get('direction', 'start'))
-            self.quality_var.set(preset.get('quality', 'original'))
-            self.engine_var.set(preset.get('engine', 'ffmpeg'))
-            dialog.destroy()
-            messagebox.showinfo("Preset", f"Preset '{preset_var.get()}' loaded!")
+            selection = preset_listbox.curselection()
+            if not selection:
+                return
+                
+            selected_text = preset_listbox.get(selection[0])
+            
+            # Skip separator lines
+            if selected_text.startswith("---") or selected_text == "":
+                return
+                
+            if selected_text in all_presets:
+                preset = all_presets[selected_text]
+                self.duration_var.set(preset.get('duration', '10'))
+                self.direction_var.set(preset.get('direction', 'start'))
+                self.quality_var.set(preset.get('quality', 'original'))
+                self.engine_var.set(preset.get('engine', 'ffmpeg'))
+                dialog.destroy()
+                messagebox.showinfo("Preset", f"Preset '{selected_text}' loaded!")
         
-        ctk.CTkButton(dialog, text="Load", command=load_selected).pack(pady=5)
-        ctk.CTkButton(dialog, text="Cancel", command=dialog.destroy).pack(pady=5)
+        button_frame = ctk.CTkFrame(dialog)
+        button_frame.pack(fill="x", padx=10, pady=10)
+        
+        ctk.CTkButton(button_frame, text="Load", command=load_selected).pack(side="left", padx=5)
+        ctk.CTkButton(button_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=5)
     
-    def load_settings(self):
-        """Load application settings."""
-        # Apply theme settings
-        theme = self.config.get("appearance.theme", "dark")
-        color_theme = self.config.get("appearance.color_theme", "blue")
+    def load_theme_settings(self):
+        """Load and apply theme settings before UI creation."""
+        theme = self.config_manager.get("appearance.theme", "dark")
+        color_theme = self.config_manager.get("appearance.color_theme", "blue")
         
         ctk.set_appearance_mode(theme)
         ctk.set_default_color_theme(color_theme)
-        
-        # Apply window geometry
-        geometry = self.config.get("appearance.window_geometry", "1000x800")
+    
+    def load_settings(self):
+        """Load remaining application settings."""
+        # Apply window geometry (themes already loaded in load_theme_settings)
+        geometry = self.config_manager.get("appearance.window_geometry", "1200x900")
         self.geometry(geometry)
     
     def on_job_completed(self, job: ProcessingJob):
@@ -1147,17 +1375,21 @@ Quality: {self.quality_var.get().title()}"""
     
     @staticmethod
     def format_duration(seconds: float) -> str:
-        """Formats seconds into HH:MM:SS.ms"""
-        if seconds < 0: seconds = 0
-        m, s = divmod(seconds, 60)
-        h, m = divmod(m, 60)
-        return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
+        """Format duration in seconds to readable format."""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = seconds % 60
+        
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:06.2f}"
+        else:
+            return f"{minutes:02d}:{secs:06.2f}"
     
     def on_closing(self):
         """Handle application closing."""
         # Save window state
-        if self.config.get("appearance.remember_window_state", True):
-            self.config.set("appearance.window_geometry", self.geometry())
+        if self.config_manager.get("appearance.remember_window_state", True):
+            self.config_manager.set("appearance.window_geometry", self.geometry())
         
         # Stop queue processing
         self.queue_manager.stop_processing()

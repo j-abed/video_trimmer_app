@@ -7,7 +7,11 @@ This script shows the time difference when trimming videos using different metho
 import time
 import os
 from pathlib import Path
-from ffmpeg_trimmer import FFmpegTrimmer
+try:
+    from .ffmpeg_trimmer import FFmpegTrimmer
+except ImportError:
+    # Fallback for direct script execution
+    from ffmpeg_trimmer import FFmpegTrimmer
 from moviepy import VideoFileClip
 
 

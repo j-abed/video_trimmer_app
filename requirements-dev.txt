@@ -1,0 +1,57 @@
+# Development Dependencies
+# Additional packages needed for development and testing
+
+# All production dependencies
+-r requirements.txt
+
+# Testing framework
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-mock>=3.11.0
+
+# Code quality
+black>=23.7.0
+flake8>=6.0.0
+isort>=5.12.0
+mypy>=1.5.0
+
+# Development tools
+ipython>=8.14.0
+jupyter>=1.0.0
+pre-commit>=3.3.0
+
+# Documentation
+sphinx>=7.1.0
+sphinx-rtd-theme>=1.3.0
+myst-parser>=2.0.0
+
+# Packaging
+build>=0.10.0
+twine>=4.0.0
+setuptools>=68.0.0
+wheel>=0.41.0
+
+# Platform-specific dependencies for better functionality
+# Windows
+pywin32>=306; sys_platform == "win32"
+
+# macOS
+py-applescript>=1.0.2; sys_platform == "darwin"
+
+# Linux
+python-dbus>=1.2.18; sys_platform == "linux"
+
+# Performance monitoring
+memory-profiler>=0.61.0
+line-profiler>=4.0.0
+
+# Enhanced video processing (optional)
+imageio-ffmpeg>=0.4.8
+scikit-video>=1.1.11
+
+# GUI development tools
+tkinter-tooltip>=1.2.0
+
+# Network and API tools
+requests>=2.31.0
+aiohttp>=3.8.5
